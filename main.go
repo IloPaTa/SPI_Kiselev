@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"time"
+	"sync"
 )
 
 // AppConfig - структура конфигурации
@@ -12,18 +12,20 @@ type AppConfig struct {
 	DatabaseURL    string
 	LogLevel       string
 	MaxConnections int
+	mu             sync.Mutex // Мьютекс для безопасного изменения полей
 }
 
-// instance - переменная для хранения единственного экземпляра
-var instance *AppConfig
+var (
+	instance *AppConfig
+	once     sync.Once // Примитив для однократного выполнения
+)
 
-// GetInstance - метод получения экземпляра (НЕ ПОТОКОБЕЗОПАСНЫЙ!)
+// GetInstance - потокобезопасный метод получения экземпляра
 func GetInstance() *AppConfig {
-	if instance == nil {
-		// Имитация тяжелой инициализации
-		fmt.Println("[SINGLETON] Initializing AppConfig instance...")
-		time.Sleep(100 * time.Millisecond)
-
+	// once.Do гарантирует, что функция внутри выполнится ровно один раз
+	// даже при вызове из 1000 горутин одновременно
+	once.Do(func() {
+		fmt.Println("[SINGLETON] Creating AppConfig instance (ONCE)...")
 		instance = &AppConfig{
 			AppName:        "MySuperApp",
 			Version:        "1.0.0",
@@ -31,46 +33,74 @@ func GetInstance() *AppConfig {
 			LogLevel:       "INFO",
 			MaxConnections: 10,
 		}
-	} else {
-		fmt.Println("[SINGLETON] Returning existing instance")
-	}
+	})
 	return instance
 }
 
-// Print - метод вывода конфигурации
+// SetLogLevel - потокобезопасный сеттер
+func (c *AppConfig) SetLogLevel(level string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.LogLevel = level
+	fmt.Printf("[CONFIG] Set log level to %s\n", level)
+}
+
+// GetDatabaseURL - геттер
+func (c *AppConfig) GetDatabaseURL() string {
+	return c.DatabaseURL
+}
+
+// Print - вывод текущего состояния
 func (c *AppConfig) Print() {
-	fmt.Printf("Config: {App: %s, Ver: %s, DB: %s, Log: %s}\n",
-		c.AppName, c.Version, c.DatabaseURL, c.LogLevel)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fmt.Printf("Config State: {App: %s, Level: %s, Ptr: %p}\n",
+		c.AppName, c.LogLevel, c)
 }
 
 func main() {
-	fmt.Println("=== Singleton Pattern Demo (Unsafe) ===")
+	fmt.Println("=== Singleton Pattern Demo (Thread-Safe) ===")
 
-	// Тест 1: Последовательный вызов (работает нормально)
-	fmt.Println("\n--- Sequential Access ---")
-	cfg1 := GetInstance()
-	cfg2 := GetInstance()
+	// Тест 1: Конкурентный доступ
+	fmt.Println("\n--- Concurrent Access Test ---")
 
-	if cfg1 == cfg2 {
-		fmt.Println("SUCCESS: Both variables point to the same instance")
-	} else {
-		fmt.Println("FAIL: Variables point to different instances")
-	}
+	var wg sync.WaitGroup
 
-	// Тест 2: Конкурентный вызов (покажет проблему)
-	// В этой версии инициализация может произойти ДВАЖДЫ
-	fmt.Println("\n--- Concurrent Access ---")
-
-	// Сбрасываем инстанс для теста
-	instance = nil
-
-	for i := 0; i < 5; i++ {
+	// Запускаем 10 горутин одновременно
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
 		go func(id int) {
+			defer wg.Done()
 			cfg := GetInstance()
-			fmt.Printf("Goroutine %d got config: %p\n", id, cfg)
+			// Просто для демо, чтобы убедиться что адрес один
+			if id == 0 || id == 9 {
+				fmt.Printf("Goroutine %d -> Config Ptr: %p\n", id, cfg)
+			}
 		}(i)
 	}
 
-	// Ждем завершения горутин
-	time.Sleep(1 * time.Second)
+	wg.Wait() // Ждем всех корректно
+	fmt.Println("All goroutines finished.")
+
+	// Тест 2: Проверка единственности и изменения данных
+	fmt.Println("\n--- Data Consistency Test ---")
+
+	cfg1 := GetInstance()
+	cfg2 := GetInstance()
+
+	fmt.Printf("cfg1 LogLevel before: %s\n", cfg1.LogLevel)
+
+	// Меняем через первую ссылку
+	cfg1.SetLogLevel("DEBUG")
+
+	// Проверяем через вторую ссылку
+	fmt.Printf("cfg2 LogLevel after:  %s\n", cfg2.LogLevel)
+
+	if cfg1.LogLevel == cfg2.LogLevel {
+		fmt.Println("SUCCESS: Changes reflected globally")
+	} else {
+		fmt.Println("FAIL: Instances are desynchronized")
+	}
+
+	cfg2.Print()
 }
